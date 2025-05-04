@@ -1,0 +1,6 @@
+.rag
+.rag/*
+documents
+__pycache__
+vector_store
+result.txt
