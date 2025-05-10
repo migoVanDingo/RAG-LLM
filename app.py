@@ -1,13 +1,17 @@
 import os
+import sys
+import threading
+import time
 from typing import Dict, List
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import Chroma
+from langchain.chains import ConversationalRetrievalChain
 from langchain.chains import RetrievalQA
+
 from langchain.prompts import PromptTemplate
 from langchain_community.llms import Ollama
 from langchain.memory import ConversationSummaryBufferMemory
-from langchain.chains import RetrievalQA
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import OllamaLLM
 
@@ -36,7 +40,7 @@ def load_pdfs_from_folder(folder_path) -> List[Dict]:
             file_path = os.path.join(folder_path, pdf_file)
             print(f"file_path: {file_path}")
             try:
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=30, length_function=len)
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100, separators=["\n\n", "\n", ".", " "])
                 
                 document = PyPDFLoader(file_path).load_and_split(text_splitter=text_splitter)
                 
@@ -86,13 +90,13 @@ def embed_docs(documents, embedding_model_name: str) -> None:
 
 def generate_context(question: str, vector_store):
     try:
-        print("==== Generating Context ====")
+        #print("==== Generating Context ====")
 
         retriever = vector_store.as_retriever(search_kwargs={"k": 4})
         docs = retriever.get_relevant_documents(question)
         context = "\n\n".join([doc.page_content for doc in docs])
 
-        print(f"Context: {context}\n\n")
+        #print(f"Retrieved Context: {context}\n\n")
 
         return context
     except Exception as e:
@@ -101,15 +105,20 @@ def generate_context(question: str, vector_store):
 
 def prompt_template(context: str, question: str):
     try:
-        print("==== Generating Prompt ====")
+        #print("==== Generating Prompt ====")
 
         template = """
-        <s>[INST]
-        Given the following context, answer the question.
-        {context}
-        Question: {question}
-        </s>
-        """
+<s>[INST]
+You are a language expert. Answer the following question using only the context provided. 
+Use the vocabulary and tone found in the context to shape your response — speak as if you were writing from that era. 
+Do not add unrelated modern ideas.
+
+Context:
+{context}
+
+Question: {question}
+</s>
+"""
         
         prompt = PromptTemplate(
             template=template,
@@ -118,55 +127,87 @@ def prompt_template(context: str, question: str):
 
         prompt_str = prompt.format(context=context, question=question)
 
-        print(f"Prompt: {prompt_str}\n\n")
+        #print(f"Prompt: {prompt_str}\n\n")
         
-        return prompt
+        return prompt_str
     except Exception as e:
         print(f"Error: {e}")
         return None
 
 
     
-def retrieval(question, prompt_template, vector_store):
+def retrieval(vector_store):
     try:
-        print("==== Retrieval ====")
+        #print("==== Retrieval ====")
 
-        llm = OllamaLLM(model="mistral")
+        llm = OllamaLLM(model="llama3")
 
         memory = ConversationSummaryBufferMemory(llm=llm, memory_key="chat_history", return_messages=True)
 
+        
         rag = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
             retriever=vector_store.as_retriever(),
             memory=memory,
-            chain_type_kwargs={"prompt": prompt_template}
         )
 
-        print(f"Print Chain: {prompt.template}")
+        """ rag = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            retriever=vector_store.as_retriever(),
+            memory=memory
+        ) """
 
-        response = rag.invoke({"query": question})
-        return response
+        return llm
     except Exception as e:
         print(f"Error: {e}")
         return None
 
+def spinner(stop_event):
+    spinner_chars = "|/-\\"
+    i = 0
+    while not stop_event.is_set():
+        sys.stdout.write(f"\rThinking... {spinner_chars[i % len(spinner_chars)]}")
+        sys.stdout.flush()
+        time.sleep(0.1)
+        i += 1
+    sys.stdout.write("\r" + " " * 50 + "\r")  # Clear the line after it's done
 
 if __name__ == "__main__":
 
-    question = """Rewrite the following modern-day story using the slang and expressions from the provided context. Imagine it's being told by two friends from 1910s London:
-
-"Man, today has been rough. I missed the bus, spilled coffee all over my shirt, and my boss chewed me out in front of the whole office. After all that, I just wanted to grab a burger and chill, but guess what — I forgot my wallet. Again. Now I'm just wandering around the city, hoping to find some peace before heading home."
-
-Keep it conversational and reflective, like someone venting to a close mate in the pub after a long day."""
     documents = load_pdfs_from_folder("/Users/bubz/Developer/machine-learning/llm/RAG-LLM/documents")
 
     vector_store = embed_docs(documents, "all-mpnet-base-v2")
 
-    context = generate_context(question, vector_store)
+    rag = retrieval(vector_store)
 
-    prompt = prompt_template(context, question)
+    count = 0
+    while True:
+        if count == 0:
+            question = input("Ask me a question: ")
+        else: 
+            question = input("Ask me another question: ")
 
-    response = retrieval(question, prompt, vector_store)
+        if question.strip().lower() == "exit":
+            print("See ya next time!")
+            break
 
-    print(f"Response: {response}\n\n")
+        count += 1
+
+
+        context = generate_context(question, vector_store)
+        prompt = prompt_template(context, question)
+
+        stop_event = threading.Event()
+        spin_thread = threading.Thread(target=spinner, args=(stop_event,))
+        spin_thread.start()
+
+        try:
+            response = rag.invoke(prompt)
+            #response = rag.invoke({"query": prompt})
+        finally:
+            stop_event.set()
+            spin_thread.join()
+
+        #print(f"Response: {response['result']}\n\n")
+        print(f"Response: {response}\n\n")
